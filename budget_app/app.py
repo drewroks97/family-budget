@@ -85,10 +85,11 @@ def generate_forecast(seed, start_val, df_monthly, df_weekly):
     df.sort_values(by=['Date', 'Amount'], ascending=[True, False], inplace=True)
     df['Checking Balance'] = df['Amount'].cumsum()
     
-    # FORMATTING FIX: Convert Date to MM/DD/YYYY string just for display
+    # Format Date
     df['Date'] = df['Date'].dt.strftime('%m/%d/%Y')
     
-    return df[['Date', 'Description', 'Category', 'Amount', 'Checking Balance']]
+    # REORDERED COLUMNS: Date is now at the end
+    return df[['Description', 'Category', 'Amount', 'Checking Balance', 'Date']]
 
 # --- 3. SESSION STATE & DATA LOADING ---
 
@@ -144,7 +145,7 @@ edited_monthly = st.data_editor(
         "Amount": st.column_config.NumberColumn(format="$%.2f")
     },
     use_container_width=True,
-    key="monthly_editor" # Important for state
+    key="monthly_editor" 
 )
 
 # Weekly Editor
@@ -166,7 +167,6 @@ edited_weekly = st.data_editor(
 )
 
 # --- 6. EXPORT LOGIC ---
-# We prepare the JSON string for download
 export_data = {
     "seed": seed,
     "start_date": str(start_date),
@@ -182,8 +182,7 @@ st.sidebar.download_button(
     data=json_string
 )
 
-
-# --- 7. CALCULATION ---
+# --- 7. CALCULATION & STYLING ---
 st.divider()
 
 if st.button("Generate Forecast", type="primary", use_container_width=True):
@@ -193,35 +192,25 @@ if st.button("Generate Forecast", type="primary", use_container_width=True):
         end_bal = result_df.iloc[-1]['Checking Balance']
         min_bal = result_df['Checking Balance'].min()
         
-        # Metrics at the top
         c1, c2, c3 = st.columns(3)
         c1.metric("End of Year Balance", f"${end_bal:,.2f}")
         c2.metric("Lowest Point", f"${min_bal:,.2f}", delta_color="inverse")
         
-        # --- STYLING LOGIC ---
+        # --- STYLE DEFINITIONS ---
         def style_negative_red_positive_green(val):
-            """
-            Returns CSS styles for coloring text:
-            - Positive: Green and Bold
-            - Negative: Red and Bold
-            """
             color = 'green' if val >= 0 else 'red'
             return f'color: {color}; font-weight: bold'
 
         def format_with_plus(val):
-            """
-            Adds a '+' sign to positive numbers and formats as currency.
-            """
             if val >= 0:
                 return f"+${val:,.2f}"
             return f"-${abs(val):,.2f}"
 
-        # Apply the styles to the dataframe
+        # --- APPLY STYLES ---
         styled_df = result_df.style\
             .map(style_negative_red_positive_green, subset=['Amount'])\
             .format({"Amount": format_with_plus, "Checking Balance": "${:,.2f}"})
 
-        # Display the styled table
         st.dataframe(
             styled_df,
             use_container_width=True,
