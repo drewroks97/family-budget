@@ -192,9 +192,25 @@ if st.button("Generate Forecast", type="primary", use_container_width=True):
         end_bal = result_df.iloc[-1]['Checking Balance']
         min_bal = result_df['Checking Balance'].min()
         
+        # --- NEW METRIC CALCULATION ---
+        # 1. How much did we actually grow? (End Balance - Initial Seed)
+        total_growth = end_bal - seed
+        
+        # 2. How many months are in this forecast? (inclusive of start month)
+        # We assume the forecast runs to Dec 31st of the start year
+        months_remaining = 12 - start_date.month + 1
+        if months_remaining < 1: months_remaining = 1 # Safety fix
+        
+        # 3. Average Monthly Surplus
+        avg_monthly_surplus = total_growth / months_remaining
+        
+        # --- DISPLAY METRICS ---
         c1, c2, c3 = st.columns(3)
         c1.metric("End of Year Balance", f"${end_bal:,.2f}")
         c2.metric("Lowest Point", f"${min_bal:,.2f}", delta_color="inverse")
+        # The new stat! Green if positive, Red if negative
+        c3.metric("Avg. Monthly Surplus", f"${avg_monthly_surplus:,.2f}", 
+                  delta="Positive" if avg_monthly_surplus > 0 else "Negative")
         
         # --- STYLE DEFINITIONS ---
         def style_negative_red_positive_green(val):
