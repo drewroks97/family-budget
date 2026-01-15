@@ -7,52 +7,44 @@ from dateutil.relativedelta import relativedelta
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Family Cash Flow", layout="wide", page_icon="💰")
 
-# --- 2. CALLBACKS (With Type Safety) ---
-def sync_monthly():
-    # Ensure we store a DataFrame, even if the editor returns a list
-    data = st.session_state['monthly_editor']
-    if not isinstance(data, pd.DataFrame):
-        data = pd.DataFrame(data)
-    st.session_state['monthly_data'] = data
+# --- 2. SAFETY FUNCTIONS (The Fix for Crashes) ---
+def safe_to_df(data, date_cols=None):
+    """
+    Forces any data (List, Dict, or existing DataFrame) into a clean Pandas DataFrame.
+    This prevents the AttributeError and ValueError crashes.
+    """
+    try:
+        # If it's None or empty, return an empty DF
+        if data is None:
+            return pd.DataFrame()
+        
+        # Convert to DataFrame if it isn't one already
+        if not isinstance(data, pd.DataFrame):
+            df = pd.DataFrame(data)
+        else:
+            df = data
 
-def sync_weekly():
-    data = st.session_state['weekly_editor']
-    if not isinstance(data, pd.DataFrame):
-        data = pd.DataFrame(data)
-    st.session_state['weekly_data'] = data
+        # Fix Date Columns if requested
+        if date_cols and not df.empty:
+            for col in date_cols:
+                if col in df.columns:
+                    # Coerce errors to NaT, then drop or handle if needed
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+        
+        return df
+    except Exception as e:
+        st.error(f"Data Error: {e}")
+        return pd.DataFrame()
 
-def sync_onetime():
-    data = st.session_state['onetime_editor']
-    if not isinstance(data, pd.DataFrame):
-        data = pd.DataFrame(data)
-    st.session_state['onetime_data'] = data
-
-# --- 3. HELPER FUNCTIONS ---
 def convert_df_to_json(df):
     """Safely converts DataFrame to JSON string."""
-    # Defensive cast: Ensure it's a DataFrame before processing
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
-        
-    df_copy = df.copy()
+    df_clean = safe_to_df(df)
+    df_copy = df_clean.copy()
     if 'Date' in df_copy.columns:
         df_copy['Date'] = df_copy['Date'].astype(str)
     return df_copy.to_json(orient="records", indent=4)
 
-def load_json_to_df(uploaded_file, date_columns=None):
-    try:
-        data = json.load(uploaded_file)
-        df = pd.DataFrame(data)
-        if date_columns:
-            for col in date_columns:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col]).dt.date
-        return df
-    except Exception as e:
-        st.error(f"Error parsing file: {e}")
-        return pd.DataFrame()
-
-# --- 4. MATH LOGIC ---
+# --- 3. MATH LOGIC ---
 def get_dates_monthly(start_date, end_date, day_of_month):
     dates = []
     cursor = pd.to_datetime(start_date)
@@ -92,10 +84,10 @@ def generate_forecast(seed, start_val, df_monthly, df_weekly, df_onetime):
     end_date = pd.Timestamp(year=start_date.year, month=12, day=31)
     all_transactions = []
 
-    # Defensive casting for math engine
-    if not isinstance(df_monthly, pd.DataFrame): df_monthly = pd.DataFrame(df_monthly)
-    if not isinstance(df_weekly, pd.DataFrame): df_weekly = pd.DataFrame(df_weekly)
-    if not isinstance(df_onetime, pd.DataFrame): df_onetime = pd.DataFrame(df_onetime)
+    # Safe Cast before Math
+    df_monthly = safe_to_df(df_monthly)
+    df_weekly = safe_to_df(df_weekly)
+    df_onetime = safe_to_df(df_onetime)
 
     # Seed
     all_transactions.append({'Date': start_date, 'Description': 'Starting Balance', 'Category': 'Deposit', 'Amount': seed, 'Type': 'Seed'})
@@ -132,7 +124,7 @@ def generate_forecast(seed, start_val, df_monthly, df_weekly, df_onetime):
     df['Date'] = df['Date'].dt.strftime('%m/%d/%Y')
     return df[['Description', 'Category', 'Amount', 'Checking Balance', 'Date']]
 
-# --- 5. INITIALIZATION ---
+# --- 4. INITIALIZATION ---
 if 'monthly_data' not in st.session_state:
     st.session_state['monthly_data'] = pd.DataFrame([
         {"Active": True, "Type": "Bill", "Name": "Rent (Drew)", "Category": "Housing", "Amount": 1000.0, "Day (1-31)": 1},
@@ -150,7 +142,12 @@ if 'onetime_data' not in st.session_state:
 if 'seed' not in st.session_state: st.session_state['seed'] = 3500.0
 if 'start_date' not in st.session_state: st.session_state['start_date'] = date(2026, 3, 1)
 
-# --- 6. SIDEBAR: MASTER CONTROLS ---
+# Ensure state is always a DataFrame (Fixes Type Errors on startup)
+st.session_state['monthly_data'] = safe_to_df(st.session_state['monthly_data'])
+st.session_state['weekly_data'] = safe_to_df(st.session_state['weekly_data'])
+st.session_state['onetime_data'] = safe_to_df(st.session_state['onetime_data'], date_cols=['Date'])
+
+# --- 5. SIDEBAR: MASTER CONTROLS ---
 st.sidebar.header("⚙️ Master Controls")
 
 # Master Load
@@ -160,20 +157,13 @@ if master_uploaded is not None:
         data = json.load(master_uploaded)
         st.session_state['seed'] = data['seed']
         st.session_state['start_date'] = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
-        st.session_state['monthly_data'] = pd.DataFrame(data['monthly'])
-        st.session_state['weekly_data'] = pd.DataFrame(data['weekly'])
         
-        df_ot = pd.DataFrame(data.get('onetime', []))
-        if not df_ot.empty and 'Date' in df_ot.columns:
-            df_ot['Date'] = pd.to_datetime(df_ot['Date']).dt.date
-        st.session_state['onetime_data'] = df_ot
+        # Load and Force to DataFrame immediately
+        st.session_state['monthly_data'] = safe_to_df(data['monthly'])
+        st.session_state['weekly_data'] = safe_to_df(data['weekly'])
+        st.session_state['onetime_data'] = safe_to_df(data.get('onetime', []), date_cols=['Date'])
         
-        # Clear editor caches to force refresh
-        for key in ['monthly_editor', 'weekly_editor', 'onetime_editor']:
-            if key in st.session_state: del st.session_state[key]
-            
-        st.sidebar.success("Loaded! (Click 'Rerun' if data doesn't appear immediately)")
-        st.rerun()
+        st.sidebar.success("Loaded!")
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
@@ -181,31 +171,34 @@ if master_uploaded is not None:
 seed = st.sidebar.number_input("Starting Balance ($)", value=st.session_state['seed'], step=100.0)
 start_date = st.sidebar.date_input("Start Date", value=st.session_state['start_date'])
 
-# --- SAFETY FIX HERE: Force DataFrames before export ---
-export_ot = pd.DataFrame(st.session_state['onetime_data']).copy()
-if not export_ot.empty and 'Date' in export_ot.columns: export_ot['Date'] = export_ot['Date'].astype(str)
+# Convert Date Objects to Strings for JSON Save
+export_ot = st.session_state['onetime_data'].copy()
+if not export_ot.empty and 'Date' in export_ot.columns: 
+    export_ot['Date'] = export_ot['Date'].astype(str)
 
+# Safe Export Dictionary
 master_export = {
     "seed": seed, 
     "start_date": str(start_date),
-    "monthly": pd.DataFrame(st.session_state['monthly_data']).to_dict(orient="records"),
-    "weekly": pd.DataFrame(st.session_state['weekly_data']).to_dict(orient="records"),
+    "monthly": st.session_state['monthly_data'].to_dict(orient="records"),
+    "weekly": st.session_state['weekly_data'].to_dict(orient="records"),
     "onetime": export_ot.to_dict(orient="records")
 }
 st.sidebar.download_button("💾 Save Full Budget", file_name="full_budget.json", data=json.dumps(master_export, indent=4), mime="application/json")
 
-# --- 7. MAIN INTERFACE ---
+# --- 6. MAIN INTERFACE ---
 st.title("💰 Family Cash Flow")
 
 # Monthly
 st.subheader("1. Monthly Items")
-st.data_editor(
+# The "Reset" Fix: Simply assign the result of the editor back to session state.
+# Removing the on_change callback prevents the race condition crashes.
+st.session_state['monthly_data'] = st.data_editor(
     st.session_state['monthly_data'],
     num_rows="dynamic",
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"], required=True), "Day (1-31)": st.column_config.NumberColumn(min_value=1, max_value=31), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
-    key="monthly_editor",
-    on_change=sync_monthly 
+    key="monthly_editor" 
 )
 
 with st.expander("📂 Import / Export Monthly"):
@@ -213,19 +206,17 @@ with st.expander("📂 Import / Export Monthly"):
     c1.download_button("Export Monthly", data=convert_df_to_json(st.session_state['monthly_data']), file_name="monthly.json", mime="application/json")
     up_m = c2.file_uploader("Import Monthly", type=["json"], key="up_m")
     if up_m:
-        st.session_state['monthly_data'] = load_json_to_df(up_m)
-        if 'monthly_editor' in st.session_state: del st.session_state['monthly_editor']
+        st.session_state['monthly_data'] = safe_to_df(json.load(up_m))
         st.rerun()
 
 # Weekly
 st.subheader("2. Weekly Items")
-st.data_editor(
+st.session_state['weekly_data'] = st.data_editor(
     st.session_state['weekly_data'],
     num_rows="dynamic",
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"]), "Freq": st.column_config.SelectboxColumn(options=["Weekly", "Bi-Weekly"]), "Day Name": st.column_config.SelectboxColumn(options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
-    key="weekly_editor",
-    on_change=sync_weekly 
+    key="weekly_editor"
 )
 
 with st.expander("📂 Import / Export Weekly"):
@@ -233,19 +224,17 @@ with st.expander("📂 Import / Export Weekly"):
     c1.download_button("Export Weekly", data=convert_df_to_json(st.session_state['weekly_data']), file_name="weekly.json", mime="application/json")
     up_w = c2.file_uploader("Import Weekly", type=["json"], key="up_w")
     if up_w:
-        st.session_state['weekly_data'] = load_json_to_df(up_w)
-        if 'weekly_editor' in st.session_state: del st.session_state['weekly_editor']
+        st.session_state['weekly_data'] = safe_to_df(json.load(up_w))
         st.rerun()
 
 # One-Time
 st.subheader("3. One-Time Items")
-st.data_editor(
+st.session_state['onetime_data'] = st.data_editor(
     st.session_state['onetime_data'],
     num_rows="dynamic",
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"]), "Date": st.column_config.DateColumn("Date", format="MM/DD/YYYY"), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
-    key="onetime_editor",
-    on_change=sync_onetime
+    key="onetime_editor"
 )
 
 with st.expander("📂 Import / Export One-Time"):
@@ -253,13 +242,13 @@ with st.expander("📂 Import / Export One-Time"):
     c1.download_button("Export One-Time", data=convert_df_to_json(st.session_state['onetime_data']), file_name="onetime.json", mime="application/json")
     up_o = c2.file_uploader("Import One-Time", type=["json"], key="up_o")
     if up_o:
-        st.session_state['onetime_data'] = load_json_to_df(up_o, date_columns=['Date'])
-        if 'onetime_editor' in st.session_state: del st.session_state['onetime_editor']
+        st.session_state['onetime_data'] = safe_to_df(json.load(up_o), date_cols=['Date'])
         st.rerun()
 
-# --- 8. RESULTS ---
+# --- 7. RESULTS ---
 st.divider()
 if st.button("Generate Forecast", type="primary", use_container_width=True):
+    # Pass current Session State (which is automatically updated by the editors above)
     res = generate_forecast(seed, start_date, st.session_state['monthly_data'], st.session_state['weekly_data'], st.session_state['onetime_data'])
     
     if not res.empty:
