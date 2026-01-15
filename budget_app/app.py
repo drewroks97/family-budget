@@ -7,19 +7,33 @@ from dateutil.relativedelta import relativedelta
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Family Cash Flow", layout="wide", page_icon="💰")
 
-# --- 2. CALLBACKS (The Fix for the "Reset" Loop) ---
+# --- 2. CALLBACKS (With Type Safety) ---
 def sync_monthly():
-    # Helper to save widget state back to permanent storage immediately
-    st.session_state['monthly_data'] = st.session_state['monthly_editor']
+    # Ensure we store a DataFrame, even if the editor returns a list
+    data = st.session_state['monthly_editor']
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
+    st.session_state['monthly_data'] = data
 
 def sync_weekly():
-    st.session_state['weekly_data'] = st.session_state['weekly_editor']
+    data = st.session_state['weekly_editor']
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
+    st.session_state['weekly_data'] = data
 
 def sync_onetime():
-    st.session_state['onetime_data'] = st.session_state['onetime_editor']
+    data = st.session_state['onetime_editor']
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
+    st.session_state['onetime_data'] = data
 
 # --- 3. HELPER FUNCTIONS ---
 def convert_df_to_json(df):
+    """Safely converts DataFrame to JSON string."""
+    # Defensive cast: Ensure it's a DataFrame before processing
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+        
     df_copy = df.copy()
     if 'Date' in df_copy.columns:
         df_copy['Date'] = df_copy['Date'].astype(str)
@@ -32,7 +46,6 @@ def load_json_to_df(uploaded_file, date_columns=None):
         if date_columns:
             for col in date_columns:
                 if col in df.columns:
-                    # Force conversion to date objects to prevent editor crashes
                     df[col] = pd.to_datetime(df[col]).dt.date
         return df
     except Exception as e:
@@ -79,32 +92,37 @@ def generate_forecast(seed, start_val, df_monthly, df_weekly, df_onetime):
     end_date = pd.Timestamp(year=start_date.year, month=12, day=31)
     all_transactions = []
 
+    # Defensive casting for math engine
+    if not isinstance(df_monthly, pd.DataFrame): df_monthly = pd.DataFrame(df_monthly)
+    if not isinstance(df_weekly, pd.DataFrame): df_weekly = pd.DataFrame(df_weekly)
+    if not isinstance(df_onetime, pd.DataFrame): df_onetime = pd.DataFrame(df_onetime)
+
     # Seed
     all_transactions.append({'Date': start_date, 'Description': 'Starting Balance', 'Category': 'Deposit', 'Amount': seed, 'Type': 'Seed'})
 
     # Monthly
     for _, row in df_monthly.iterrows():
         if row.get('Active', True):
-            dates = get_dates_monthly(start_date, end_date, row['Day (1-31)'])
+            dates = get_dates_monthly(start_date, end_date, row.get('Day (1-31)', 1))
             for d in dates:
                 amt = row['Amount'] if row['Type'] == 'Income' else -abs(row['Amount'])
-                all_transactions.append({'Date': d, 'Description': row['Name'], 'Category': row['Category'], 'Amount': amt, 'Type': row['Type']})
+                all_transactions.append({'Date': d, 'Description': row.get('Name', ''), 'Category': row.get('Category', ''), 'Amount': amt, 'Type': row['Type']})
 
     # Weekly
     for _, row in df_weekly.iterrows():
         if row.get('Active', True):
-            dates = get_dates_weekly(start_date, end_date, row['Freq'], row['Day Name'])
+            dates = get_dates_weekly(start_date, end_date, row.get('Freq', 'Weekly'), row.get('Day Name', 'Monday'))
             for d in dates:
                 amt = row['Amount'] if row['Type'] == 'Income' else -abs(row['Amount'])
-                all_transactions.append({'Date': d, 'Description': row['Name'], 'Category': row['Category'], 'Amount': amt, 'Type': row['Type']})
+                all_transactions.append({'Date': d, 'Description': row.get('Name',''), 'Category': row.get('Category',''), 'Amount': amt, 'Type': row['Type']})
 
     # One-Time
     for _, row in df_onetime.iterrows():
-        if row.get('Active', True) and pd.notnull(row['Date']):
+        if row.get('Active', True) and pd.notnull(row.get('Date')):
             item_date = pd.to_datetime(row['Date'])
             if start_date <= item_date <= end_date:
                 amt = row['Amount'] if row['Type'] == 'Income' else -abs(row['Amount'])
-                all_transactions.append({'Date': item_date, 'Description': row['Name'], 'Category': row['Category'], 'Amount': amt, 'Type': row['Type']})
+                all_transactions.append({'Date': item_date, 'Description': row.get('Name',''), 'Category': row.get('Category',''), 'Amount': amt, 'Type': row['Type']})
 
     if not all_transactions: return pd.DataFrame()
 
@@ -163,14 +181,15 @@ if master_uploaded is not None:
 seed = st.sidebar.number_input("Starting Balance ($)", value=st.session_state['seed'], step=100.0)
 start_date = st.sidebar.date_input("Start Date", value=st.session_state['start_date'])
 
-export_ot = st.session_state['onetime_data'].copy()
+# --- SAFETY FIX HERE: Force DataFrames before export ---
+export_ot = pd.DataFrame(st.session_state['onetime_data']).copy()
 if not export_ot.empty and 'Date' in export_ot.columns: export_ot['Date'] = export_ot['Date'].astype(str)
 
 master_export = {
     "seed": seed, 
     "start_date": str(start_date),
-    "monthly": st.session_state['monthly_data'].to_dict(orient="records"),
-    "weekly": st.session_state['weekly_data'].to_dict(orient="records"),
+    "monthly": pd.DataFrame(st.session_state['monthly_data']).to_dict(orient="records"),
+    "weekly": pd.DataFrame(st.session_state['weekly_data']).to_dict(orient="records"),
     "onetime": export_ot.to_dict(orient="records")
 }
 st.sidebar.download_button("💾 Save Full Budget", file_name="full_budget.json", data=json.dumps(master_export, indent=4), mime="application/json")
@@ -186,7 +205,7 @@ st.data_editor(
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"], required=True), "Day (1-31)": st.column_config.NumberColumn(min_value=1, max_value=31), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
     key="monthly_editor",
-    on_change=sync_monthly # <--- This callback fixes the reset loop
+    on_change=sync_monthly 
 )
 
 with st.expander("📂 Import / Export Monthly"):
@@ -206,7 +225,7 @@ st.data_editor(
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"]), "Freq": st.column_config.SelectboxColumn(options=["Weekly", "Bi-Weekly"]), "Day Name": st.column_config.SelectboxColumn(options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
     key="weekly_editor",
-    on_change=sync_weekly # <--- Callback
+    on_change=sync_weekly 
 )
 
 with st.expander("📂 Import / Export Weekly"):
@@ -226,7 +245,7 @@ st.data_editor(
     column_config={"Type": st.column_config.SelectboxColumn(options=["Bill", "Income"]), "Date": st.column_config.DateColumn("Date", format="MM/DD/YYYY"), "Amount": st.column_config.NumberColumn(format="$%.2f")},
     use_container_width=True,
     key="onetime_editor",
-    on_change=sync_onetime # <--- Callback
+    on_change=sync_onetime
 )
 
 with st.expander("📂 Import / Export One-Time"):
@@ -241,7 +260,6 @@ with st.expander("📂 Import / Export One-Time"):
 # --- 8. RESULTS ---
 st.divider()
 if st.button("Generate Forecast", type="primary", use_container_width=True):
-    # Use the session_state directly to ensure we get the latest edits
     res = generate_forecast(seed, start_date, st.session_state['monthly_data'], st.session_state['weekly_data'], st.session_state['onetime_data'])
     
     if not res.empty:
