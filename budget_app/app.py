@@ -528,4 +528,265 @@ if st.button("Calculate MTM Solvency", use_container_width=True, type="secondary
     
     with st.spinner("Calculating monthly averages..."):
         # Monthly Table
-        for _, row in st.session_state.mon
+        for _, row in st.session_state.monthly_data.iterrows():
+            if row.get('Active', False):
+                if row.get('Type') == 'Income': 
+                    total_income_est += float(row.get('Amount', 0))
+                elif row.get('Type') == 'Bill': 
+                    total_bills_est += float(row.get('Amount', 0))
+        
+        # Weekly Table (Avg Multipliers)
+        for _, row in st.session_state.weekly_data.iterrows():
+            if row.get('Active', False):
+                multiplier = 4.333 if row.get('Freq') == "Weekly" else 2.166
+                monthly_val = float(row.get('Amount', 0)) * multiplier
+                if row.get('Type') == 'Income': 
+                    total_income_est += monthly_val
+                elif row.get('Type') == 'Bill': 
+                    total_bills_est += monthly_val
+        
+        # One-Time Table (Amortized)
+        for _, row in st.session_state.onetime_data.iterrows():
+            if row.get('Active', False):
+                monthly_impact = float(row.get('Amount', 0)) / 12.0
+                if row.get('Type') == 'Income': 
+                    total_income_est += monthly_impact
+                elif row.get('Type') == 'Bill': 
+                    total_bills_est += monthly_impact
+        
+        net_solvency_est = total_income_est - total_bills_est
+        
+        # Display Avg Metrics
+        st.caption("### Estimated Monthly Average")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Avg Income", f"${total_income_est:,.2f}")
+        c2.metric("Avg Bills", f"${total_bills_est:,.2f}")
+        c3.metric("Avg Net", f"${net_solvency_est:,.2f}", 
+            delta="Positive" if net_solvency_est >= 0 else "Negative",
+            delta_color="normal" if net_solvency_est >= 0 else "inverse")
+        
+        # Visual indicator
+        if net_solvency_est >= 0:
+            st.success(f"✅ You have a positive monthly cash flow of ${net_solvency_est:,.2f} on average")
+        else:
+            st.error(f"⚠️ You have a negative monthly cash flow of ${abs(net_solvency_est):,.2f} on average")
+        
+        # B. DETAILED MONTHLY TABLE (Actual Dates)
+        st.markdown("---")
+        st.caption("### 📅 Actual Month-by-Month Breakdown")
+        
+        # Get all transactions
+        df_trans = get_all_transactions(
+            current_seed, 
+            current_start_date, 
+            st.session_state.monthly_data.to_dict(orient='records'),
+            st.session_state.weekly_data.to_dict(orient='records'),
+            st.session_state.onetime_data.to_dict(orient='records')
+        )
+        
+        if not df_trans.empty:
+            # Filter out the initial Seed deposit so it doesn't skew Income
+            df_ops = df_trans[df_trans['Type'] != 'Seed'].copy()
+            
+            if not df_ops.empty:
+                # Create Month-Year column for grouping
+                df_ops['Month'] = pd.to_datetime(df_ops['Date']).dt.to_period('M')
+                
+                # Group by Month and Type
+                monthly_groups = df_ops.groupby(['Month', 'Type'])['Amount'].sum().unstack(fill_value=0)
+                
+                # Ensure we have both columns
+                for col in ['Income', 'Bill']:
+                    if col not in monthly_groups.columns:
+                        monthly_groups[col] = 0.0
+                
+                # Calculate net (Bill amounts are negative)
+                monthly_groups['Net Solvency'] = monthly_groups['Income'] + monthly_groups['Bill']
+                monthly_groups['Status'] = monthly_groups['Net Solvency'].apply(
+                    lambda x: '✅ Positive' if x >= 0 else '⚠️ Negative'
+                )
+                
+                # Formatting for display
+                monthly_groups.index = monthly_groups.index.strftime('%B %Y')
+                monthly_groups = monthly_groups.reset_index()
+                monthly_groups.rename(
+                    columns={
+                        'Bill': 'Total Bills', 
+                        'Income': 'Total Income',
+                        'index': 'Month'
+                    }, 
+                    inplace=True
+                )
+                
+                # Reorder columns
+                monthly_groups = monthly_groups[['Month', 'Total Income', 'Total Bills', 'Net Solvency', 'Status']]
+                
+                # Style the dataframe
+                def style_row(row):
+                    styles = [''] * len(row)
+                    if row['Net Solvency'] < 0:
+                        styles[-2] = 'background-color: #ffcccc; font-weight: bold;'
+                    else:
+                        styles[-2] = 'background-color: #ccffcc; font-weight: bold;'
+                    return styles
+                
+                st.dataframe(
+                    monthly_groups.style.apply(style_row, axis=1).format({
+                        "Total Income": "${:,.2f}", 
+                        "Total Bills": "${:,.2f}", 
+                        "Net Solvency": "${:,.2f}"
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Summary statistics
+                positive_months = (monthly_groups['Net Solvency'] >= 0).sum()
+                total_months = len(monthly_groups)
+                
+                col1, col2 = st.columns(2)
+                col1.metric("Positive Months", positive_months, f"{positive_months}/{total_months}")
+                col2.metric("Negative Months", total_months - positive_months)
+            else:
+                st.info("No transactions found for the selected period.")
+        else:
+            st.info("Add items to calculate monthly breakdown.")
+
+# --- 10. FORECAST GENERATION ---
+st.divider()
+st.subheader("📈 Cash Flow Forecast")
+
+# Add a refresh button that doesn't require re-entry
+col1, col2 = st.columns([3, 1])
+with col1:
+    forecast_clicked = st.button("Generate Forecast", type="primary", use_container_width=True)
+with col2:
+    if st.button("Refresh Data", type="secondary", use_container_width=True):
+        st.rerun()
+
+if forecast_clicked:
+    with st.spinner("Generating cash flow forecast..."):
+        result_df = generate_forecast(
+            current_seed, 
+            current_start_date,
+            st.session_state.monthly_data.to_dict(orient='records'),
+            st.session_state.weekly_data.to_dict(orient='records'),
+            st.session_state.onetime_data.to_dict(orient='records')
+        )
+        
+        if not result_df.empty:
+            # Calculate metrics
+            end_bal = result_df.iloc[-1]['Checking Balance']
+            min_bal = result_df['Checking Balance'].min()
+            total_growth = end_bal - current_seed
+            
+            # Calculate months remaining from start_date to end of year
+            start_dt = pd.to_datetime(current_start_date)
+            end_of_year = pd.Timestamp(year=start_dt.year, month=12, day=31)
+            months_remaining = max(1, ((end_of_year.year - start_dt.year) * 12) + 
+                                 (end_of_year.month - start_dt.month))
+            
+            avg_monthly_surplus = total_growth / months_remaining
+            
+            # Display key metrics
+            st.caption("### Summary Metrics")
+            c1, c2, c3 = st.columns(3)
+            c1.metric(
+                "End of Year Balance", 
+                f"${end_bal:,.2f}",
+                delta=f"${total_growth:,.2f}" if total_growth != 0 else None,
+                delta_color="normal" if total_growth >= 0 else "inverse"
+            )
+            c2.metric(
+                "Lowest Balance", 
+                f"${min_bal:,.2f}",
+                delta="Critical" if min_bal < 0 else "Safe",
+                delta_color="inverse" if min_bal < 0 else "normal"
+            )
+            c3.metric(
+                "Avg. Monthly Surplus", 
+                f"${avg_monthly_surplus:,.2f}", 
+                delta="Positive" if avg_monthly_surplus > 0 else "Negative",
+                delta_color="normal" if avg_monthly_surplus > 0 else "inverse"
+            )
+            
+            # Visual indicator
+            if min_bal < 0:
+                st.error(f"⚠️ Warning: Your balance goes negative (lowest: ${min_bal:,.2f})")
+            elif min_bal < current_seed * 0.1:  # Less than 10% of starting balance
+                st.warning(f"⚠️ Caution: Your balance gets low (minimum: ${min_bal:,.2f})")
+            else:
+                st.success(f"✅ Your balance stays positive throughout the year")
+            
+            # Display the forecast table
+            st.markdown("---")
+            st.caption(f"### Detailed Transaction Forecast ({len(result_df)} transactions)")
+            
+            # Formatting functions
+            def style_amount(val):
+                if val >= 0:
+                    return 'color: #006400; font-weight: bold;'
+                else:
+                    return 'color: #8b0000; font-weight: bold;'
+            
+            def style_balance(val):
+                if val < 0:
+                    return 'background-color: #ffcccc; font-weight: bold;'
+                elif val < current_seed * 0.1:
+                    return 'background-color: #fff3cd; font-weight: bold;'
+                else:
+                    return ''
+            
+            # Create styled dataframe
+            styled_df = result_df.style\
+                .map(style_amount, subset=['Amount'])\
+                .map(style_balance, subset=['Checking Balance'])\
+                .format({
+                    "Amount": lambda x: f"{'+' if x >= 0 else '-'}${abs(x):,.2f}",
+                    "Checking Balance": "${:,.2f}"
+                })\
+                .set_properties(**{
+                    'text-align': 'left',
+                    'padding': '8px'
+                })
+            
+            # Display with pagination
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                height=600,
+                hide_index=True
+            )
+            
+            # Download forecast as CSV
+            csv = result_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Forecast as CSV",
+                data=csv,
+                file_name="cash_flow_forecast.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            st.warning("No transactions to forecast. Add some items in the tables above.")
+
+# --- 11. ADDITIONAL FIX: Provide tips for better data entry
+st.divider()
+with st.expander("💡 Data Entry Tips"):
+    st.markdown("""
+    ### To avoid double-entry issues:
+    
+    1. **Press Tab** after typing instead of Enter
+    2. **Click outside** the cell after typing
+    3. Use the **Refresh Data** button if changes don't appear
+    4. **Save frequently** using the sidebar download button
+    
+    ### Quick actions:
+    - **Add rows**: Use the "+ Add row" button at the bottom of each table
+    - **Delete rows**: Use the checkbox in the left column, then press Delete
+    - **Bulk edit**: Click and drag to select multiple cells
+    """)
+
+# --- 12. FOOTER ---
+st.divider()
+st.caption("💡 **Tip**: Press Tab or click outside the cell to save your entries immediately.")
