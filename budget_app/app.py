@@ -35,10 +35,6 @@ def validate_data(df_monthly, df_weekly, df_onetime):
             invalid_dates = df_onetime[dates.isna()]
             if not invalid_dates.empty:
                 warnings.append("⚠️ One-time items have invalid dates")
-            
-            far_future = df_onetime[dates > pd.Timestamp('2050-01-01')]
-            if not far_future.empty:
-                warnings.append("⚠️ Some one-time items have dates beyond 2050")
         except:
             pass
     
@@ -210,11 +206,49 @@ def initialize_session_state():
     
     if 'last_saved' not in st.session_state:
         st.session_state.last_saved = None
+    
+    # Track if data has been edited
+    if 'monthly_edited' not in st.session_state:
+        st.session_state.monthly_edited = False
+    if 'weekly_edited' not in st.session_state:
+        st.session_state.weekly_edited = False
+    if 'onetime_edited' not in st.session_state:
+        st.session_state.onetime_edited = False
 
 # Initialize the app
 initialize_session_state()
 
-# --- 5. SIDEBAR (MASTER CONTROLS) ---
+# --- 5. SYNC SESSION STATE WITH EDITORS ---
+def sync_data_editors():
+    """Sync data from editors to session state to fix the double-entry issue."""
+    # Use the keys from the data editors to get the current state
+    if "monthly_editor" in st.session_state:
+        # Get the data from the editor's widget state
+        monthly_data = st.session_state.monthly_editor.get("edited_rows", {})
+        added_rows = st.session_state.monthly_editor.get("added_rows", [])
+        deleted_rows = st.session_state.monthly_editor.get("deleted_rows", [])
+        
+        # Only update if there are changes
+        if monthly_data or added_rows or deleted_rows:
+            st.session_state.monthly_edited = True
+            # For now, we'll rely on the returned dataframe approach below
+            # because the widget state is complex to parse
+    
+    # Same for weekly
+    if "weekly_editor" in st.session_state:
+        if (st.session_state.weekly_editor.get("edited_rows", {}) or 
+            st.session_state.weekly_editor.get("added_rows", []) or 
+            st.session_state.weekly_editor.get("deleted_rows", [])):
+            st.session_state.weekly_edited = True
+    
+    # Same for onetime
+    if "onetime_editor" in st.session_state:
+        if (st.session_state.onetime_editor.get("edited_rows", {}) or 
+            st.session_state.onetime_editor.get("added_rows", []) or 
+            st.session_state.onetime_editor.get("deleted_rows", [])):
+            st.session_state.onetime_edited = True
+
+# --- 6. SIDEBAR (MASTER CONTROLS) ---
 st.sidebar.header("⚙️ Master Controls")
 
 # Load example button
@@ -317,7 +351,7 @@ st.sidebar.download_button(
 if st.session_state.last_saved:
     st.sidebar.caption(f"Last loaded: *{st.session_state.last_saved}*")
 
-# --- 6. MAIN INTERFACE ---
+# --- 7. MAIN INTERFACE ---
 st.title("💰 Family Cash Flow Forecast")
 st.caption("Plan your family's cash flow for the rest of the year")
 
@@ -335,11 +369,14 @@ with st.expander("❓ How to use this app"):
     4. **Generate Forecast**: View detailed day-by-day cash flow
     
     ### Tips:
+    - Click outside the cell or press Tab to save your entry
     - Use **Active** checkbox to temporarily disable items
     - **Load Example** to see a working setup
     - **Save/Load** your budget using the sidebar controls
-    - Negative checking balances are highlighted in red
     """)
+
+# Call sync function
+sync_data_editors()
 
 # Validation warnings
 warnings = validate_data(
@@ -354,12 +391,16 @@ if warnings:
         for warning in warnings:
             st.markdown(f"- {warning}")
 
-# --- 7. TRANSACTION EDITORS ---
+# --- 8. TRANSACTION EDITORS (FIXED FOR SINGLE ENTRY) ---
+# We'll use a different approach: track changes and update session state immediately
+
 tab1, tab2, tab3 = st.tabs(["📅 Monthly Items", "📆 Weekly Items", "🎯 One-time Items"])
 
 with tab1:
     st.caption("Regular monthly bills and income (e.g., rent on the 1st, salary on the 15th)")
-    edited_monthly = st.data_editor(
+    
+    # Create editor and get the returned dataframe
+    edited_monthly_df = st.data_editor(
         st.session_state.monthly_data,
         num_rows="dynamic",
         column_config={
@@ -390,11 +431,19 @@ with tab1:
         key="monthly_editor",
         hide_index=True
     )
-    st.session_state.monthly_data = edited_monthly
+    
+    # Update session state immediately with the returned dataframe
+    # This fixes the double-entry issue
+    if not edited_monthly_df.equals(st.session_state.monthly_data):
+        st.session_state.monthly_data = edited_monthly_df
+        # Force a rerun to show changes immediately
+        if st.session_state.monthly_edited:
+            st.rerun()
 
 with tab2:
     st.caption("Weekly or bi-weekly recurring items (e.g., groceries every Saturday)")
-    edited_weekly = st.data_editor(
+    
+    edited_weekly_df = st.data_editor(
         st.session_state.weekly_data,
         num_rows="dynamic",
         column_config={
@@ -425,11 +474,16 @@ with tab2:
         key="weekly_editor",
         hide_index=True
     )
-    st.session_state.weekly_data = edited_weekly
+    
+    if not edited_weekly_df.equals(st.session_state.weekly_data):
+        st.session_state.weekly_data = edited_weekly_df
+        if st.session_state.weekly_edited:
+            st.rerun()
 
 with tab3:
     st.caption("One-time or irregular items (e.g., vacation, tax refund, annual fees)")
-    edited_onetime = st.data_editor(
+    
+    edited_onetime_df = st.data_editor(
         st.session_state.onetime_data,
         num_rows="dynamic",
         column_config={
@@ -457,9 +511,13 @@ with tab3:
         key="onetime_editor",
         hide_index=True
     )
-    st.session_state.onetime_data = edited_onetime
+    
+    if not edited_onetime_df.equals(st.session_state.onetime_data):
+        st.session_state.onetime_data = edited_onetime_df
+        if st.session_state.onetime_edited:
+            st.rerun()
 
-# --- 8. MONTHLY SOLVENCY CHECK ---
+# --- 9. MONTHLY SOLVENCY CHECK ---
 st.divider()
 st.subheader("📊 Monthly Solvency Analysis")
 
@@ -470,240 +528,4 @@ if st.button("Calculate MTM Solvency", use_container_width=True, type="secondary
     
     with st.spinner("Calculating monthly averages..."):
         # Monthly Table
-        for _, row in edited_monthly.iterrows():
-            if row.get('Active', False):
-                if row.get('Type') == 'Income': 
-                    total_income_est += float(row.get('Amount', 0))
-                elif row.get('Type') == 'Bill': 
-                    total_bills_est += float(row.get('Amount', 0))
-        
-        # Weekly Table (Avg Multipliers)
-        for _, row in edited_weekly.iterrows():
-            if row.get('Active', False):
-                multiplier = 4.333 if row.get('Freq') == "Weekly" else 2.166
-                monthly_val = float(row.get('Amount', 0)) * multiplier
-                if row.get('Type') == 'Income': 
-                    total_income_est += monthly_val
-                elif row.get('Type') == 'Bill': 
-                    total_bills_est += monthly_val
-        
-        # One-Time Table (Amortized)
-        for _, row in edited_onetime.iterrows():
-            if row.get('Active', False):
-                monthly_impact = float(row.get('Amount', 0)) / 12.0
-                if row.get('Type') == 'Income': 
-                    total_income_est += monthly_impact
-                elif row.get('Type') == 'Bill': 
-                    total_bills_est += monthly_impact
-        
-        net_solvency_est = total_income_est - total_bills_est
-        
-        # Display Avg Metrics
-        st.caption("### Estimated Monthly Average")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Avg Income", f"${total_income_est:,.2f}")
-        c2.metric("Avg Bills", f"${total_bills_est:,.2f}")
-        c3.metric("Avg Net", f"${net_solvency_est:,.2f}", 
-            delta="Positive" if net_solvency_est >= 0 else "Negative",
-            delta_color="normal" if net_solvency_est >= 0 else "inverse")
-        
-        # Visual indicator
-        if net_solvency_est >= 0:
-            st.success(f"✅ You have a positive monthly cash flow of ${net_solvency_est:,.2f} on average")
-        else:
-            st.error(f"⚠️ You have a negative monthly cash flow of ${abs(net_solvency_est):,.2f} on average")
-        
-        # B. DETAILED MONTHLY TABLE (Actual Dates)
-        st.markdown("---")
-        st.caption("### 📅 Actual Month-by-Month Breakdown")
-        
-        # Get all transactions
-        df_trans = get_all_transactions(
-            current_seed, 
-            current_start_date, 
-            edited_monthly.to_dict(orient='records'),
-            edited_weekly.to_dict(orient='records'),
-            edited_onetime.to_dict(orient='records')
-        )
-        
-        if not df_trans.empty:
-            # Filter out the initial Seed deposit so it doesn't skew Income
-            df_ops = df_trans[df_trans['Type'] != 'Seed'].copy()
-            
-            if not df_ops.empty:
-                # Create Month-Year column for grouping
-                df_ops['Month'] = pd.to_datetime(df_ops['Date']).dt.to_period('M')
-                
-                # Group by Month and Type
-                monthly_groups = df_ops.groupby(['Month', 'Type'])['Amount'].sum().unstack(fill_value=0)
-                
-                # Ensure we have both columns
-                for col in ['Income', 'Bill']:
-                    if col not in monthly_groups.columns:
-                        monthly_groups[col] = 0.0
-                
-                # Calculate net (Bill amounts are negative)
-                monthly_groups['Net Solvency'] = monthly_groups['Income'] + monthly_groups['Bill']
-                monthly_groups['Status'] = monthly_groups['Net Solvency'].apply(
-                    lambda x: '✅ Positive' if x >= 0 else '⚠️ Negative'
-                )
-                
-                # Formatting for display
-                monthly_groups.index = monthly_groups.index.strftime('%B %Y')
-                monthly_groups = monthly_groups.reset_index()
-                monthly_groups.rename(
-                    columns={
-                        'Bill': 'Total Bills', 
-                        'Income': 'Total Income',
-                        'index': 'Month'
-                    }, 
-                    inplace=True
-                )
-                
-                # Reorder columns
-                monthly_groups = monthly_groups[['Month', 'Total Income', 'Total Bills', 'Net Solvency', 'Status']]
-                
-                # Style the dataframe
-                def style_row(row):
-                    styles = [''] * len(row)
-                    if row['Net Solvency'] < 0:
-                        styles[-2] = 'background-color: #ffcccc; font-weight: bold;'
-                    else:
-                        styles[-2] = 'background-color: #ccffcc; font-weight: bold;'
-                    return styles
-                
-                st.dataframe(
-                    monthly_groups.style.apply(style_row, axis=1).format({
-                        "Total Income": "${:,.2f}", 
-                        "Total Bills": "${:,.2f}", 
-                        "Net Solvency": "${:,.2f}"
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Summary statistics
-                positive_months = (monthly_groups['Net Solvency'] >= 0).sum()
-                total_months = len(monthly_groups)
-                
-                col1, col2 = st.columns(2)
-                col1.metric("Positive Months", positive_months, f"{positive_months}/{total_months}")
-                col2.metric("Negative Months", total_months - positive_months)
-            else:
-                st.info("No transactions found for the selected period.")
-        else:
-            st.info("Add items to calculate monthly breakdown.")
-
-# --- 9. FORECAST GENERATION ---
-st.divider()
-st.subheader("📈 Cash Flow Forecast")
-
-if st.button("Generate Forecast", type="primary", use_container_width=True):
-    with st.spinner("Generating cash flow forecast..."):
-        result_df = generate_forecast(
-            current_seed, 
-            current_start_date,
-            edited_monthly.to_dict(orient='records'),
-            edited_weekly.to_dict(orient='records'),
-            edited_onetime.to_dict(orient='records')
-        )
-        
-        if not result_df.empty:
-            # Calculate metrics
-            end_bal = result_df.iloc[-1]['Checking Balance']
-            min_bal = result_df['Checking Balance'].min()
-            total_growth = end_bal - current_seed
-            
-            # Calculate months remaining from start_date to end of year
-            start_dt = pd.to_datetime(current_start_date)
-            end_of_year = pd.Timestamp(year=start_dt.year, month=12, day=31)
-            months_remaining = max(1, ((end_of_year.year - start_dt.year) * 12) + 
-                                 (end_of_year.month - start_dt.month))
-            
-            avg_monthly_surplus = total_growth / months_remaining
-            
-            # Display key metrics
-            st.caption("### Summary Metrics")
-            c1, c2, c3 = st.columns(3)
-            c1.metric(
-                "End of Year Balance", 
-                f"${end_bal:,.2f}",
-                delta=f"${total_growth:,.2f}" if total_growth != 0 else None,
-                delta_color="normal" if total_growth >= 0 else "inverse"
-            )
-            c2.metric(
-                "Lowest Balance", 
-                f"${min_bal:,.2f}",
-                delta="Critical" if min_bal < 0 else "Safe",
-                delta_color="inverse" if min_bal < 0 else "normal"
-            )
-            c3.metric(
-                "Avg. Monthly Surplus", 
-                f"${avg_monthly_surplus:,.2f}", 
-                delta="Positive" if avg_monthly_surplus > 0 else "Negative",
-                delta_color="normal" if avg_monthly_surplus > 0 else "inverse"
-            )
-            
-            # Visual indicator
-            if min_bal < 0:
-                st.error(f"⚠️ Warning: Your balance goes negative (lowest: ${min_bal:,.2f})")
-            elif min_bal < current_seed * 0.1:  # Less than 10% of starting balance
-                st.warning(f"⚠️ Caution: Your balance gets low (minimum: ${min_bal:,.2f})")
-            else:
-                st.success(f"✅ Your balance stays positive throughout the year")
-            
-            # Display the forecast table
-            st.markdown("---")
-            st.caption(f"### Detailed Transaction Forecast ({len(result_df)} transactions)")
-            
-            # Formatting functions
-            def style_amount(val):
-                if val >= 0:
-                    return 'color: #006400; font-weight: bold;'
-                else:
-                    return 'color: #8b0000; font-weight: bold;'
-            
-            def style_balance(val):
-                if val < 0:
-                    return 'background-color: #ffcccc; font-weight: bold;'
-                elif val < current_seed * 0.1:
-                    return 'background-color: #fff3cd; font-weight: bold;'
-                else:
-                    return ''
-            
-            # Create styled dataframe
-            styled_df = result_df.style\
-                .map(style_amount, subset=['Amount'])\
-                .map(style_balance, subset=['Checking Balance'])\
-                .format({
-                    "Amount": lambda x: f"{'+' if x >= 0 else '-'}${abs(x):,.2f}",
-                    "Checking Balance": "${:,.2f}"
-                })\
-                .set_properties(**{
-                    'text-align': 'left',
-                    'padding': '8px'
-                })
-            
-            # Display with pagination
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=600,
-                hide_index=True
-            )
-            
-            # Download forecast as CSV
-            csv = result_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download Forecast as CSV",
-                data=csv,
-                file_name="cash_flow_forecast.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        else:
-            st.warning("No transactions to forecast. Add some items in the tables above.")
-
-# --- 10. FOOTER ---
-st.divider()
-st.caption("💡 **Tip**: Use the sidebar to save your budget configuration and load it later.")
+        for _, row in st.session_state.mon
